@@ -1,314 +1,345 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-import { LibDiamond } from "../libraries/LibDiamond.sol";
-import "../storage/facets/AppStorageFacet.sol";
-import "../storage/facets/AuctionAndRentStorageFacet.sol";
-import "../interfaces/IERC1155.sol";
-import "../interfaces/IERC1155Receiver.sol";
-import "../interfaces/IERC20.sol";
+import {LibDiamond} from "../libraries/LibDiamond.sol";
+import "../interfaces/IERC721.sol";
+import "../interfaces/IERC721Receiver.sol";
+import "../storage/Auction3StorageFacet.sol";
 
-contract AuctionAndRent is AppStorageFacet, AuctionAndRentStorageFacet, IERC1155 {
-
-  // Add auction storage struct
-  struct Auction {
-      uint256 startTime;
-      uint256 endTime;
-      uint256 highestBid;
-      address highestBidder;
-      bool ended;
-      uint256 extensionTime; // 5 minutes in seconds
-      uint256 minBidIncrement;
-  }
-
-  // Add rental storage struct 
-  struct Rental {
-      uint256 startDate;
-      uint256 endDate;
-      address paymentToken;
-      uint256 price;
-      address renter;
-  }
-
-  // Add to AuctionAndRentStorage
-  mapping(uint256 => Auction) public auctions; // tokenId => Auction
-  mapping(uint256 => Rental) public rentals; // tokenId => Rental
-  mapping(uint256 => mapping(address => uint256)) public bids; // tokenId => (bidder => amount)
-
-  function construct() external returns (bool){
-     AuctionAndRentStorage storage _ds = erc1155Storage();
-     _ds._baseURI = "https://ipfs.io/ipfs/";
-     _mint(msg.sender, "Qme7ss3ARVgxv6rXqVPiikMJ8u2NLgmgszg13pYrDKEoiu",1);
-     return true;
-  }
-
-  function uri(uint256 tokenID_) public view virtual returns (string memory) {
-      AuctionAndRentStorage storage _ds = erc1155Storage();
-
-      string memory _tokenURI = _ds._tokenURIs[tokenID_];
-      string memory _base = _ds._baseURI;
-
-      if (bytes(_base).length == 0) {
-          return _tokenURI;
-      } else if (bytes(_tokenURI).length > 0) {
-          return string(abi.encodePacked(_base, _tokenURI));
-      }
-
-      return "";
-  }
-
-  function totalSupply(uint256 id_) public view virtual returns (uint256) {
-      AuctionAndRentStorage storage _ds = erc1155Storage();
-      return _ds._totalSupply[id_];
-  }
-
-  function exists(uint256 id_) public view virtual returns (bool) {
-      return totalSupply(id_) > 0;
-  }
-
-  function balanceOf(address account_, uint256 id_) public view returns (uint256) {
-    _requireNonZero(account_);
-    AuctionAndRentStorage storage _ds = erc1155Storage();
-    return _ds._balances[id_][account_];
-  }
-
-  function balanceOfBatch(address[] calldata accounts_, uint256[] calldata ids_) external view returns (uint256[] memory) {
-    require(accounts_.length == ids_.length, "ERC1155: accounts and ids length mismatch");
-    AuctionAndRentStorage storage _ds = erc1155Storage();
-    uint256[] memory batchBalances = new uint256[](accounts_.length);
-
-    for (uint256 i = 0; i < accounts_.length; ++i) {
-        batchBalances[i] = balanceOf(accounts_[i], ids_[i]);
-    }
-
-    return batchBalances;
-  }
-
-  function setApprovalForAll(address operator_, bool approved_) external {
-    _setApprovalForAll(msg.sender, operator_, approved_);
-  }
-
-  function isApprovedForAll(address account_, address operator_) public view returns (bool) {
-    AuctionAndRentStorage storage _ds = erc1155Storage();
-    return _ds._operatorApprovals[account_][operator_];
-  }
-
-
-  function safeTransferFrom(address from_, address to_, uint256 id_, uint256 amount_, bytes calldata data_) external {
-    _requireAuth(from_);
-    _safeTransferFrom(from_, to_, id_, amount_, data_);
-  }
-
-  function safeBatchTransferFrom(address from_, address to_, uint256[] calldata ids_, uint256[] calldata amounts_, bytes calldata data_) external {
-    _requireAuth(from_);
-    _safeBatchTransferFrom(from_, to_, ids_, amounts_, data_);
-  }
-
-  function _setApprovalForAll(address owner_, address operator_, bool approved_) private {
-    require(owner_ != operator_, "ERC1155: Cannot set approval status for self");
-    AuctionAndRentStorage storage _ds = erc1155Storage();
-    _ds._operatorApprovals[owner_][operator_] = approved_;
-
-    emit ApprovalForAll(owner_, operator_, approved_);
-  }
-
-  function _safeTransferFrom(address from_, address to_, uint256 id_, uint256 amount_, bytes memory data_) private {
-    _transfer(from_, to_, id_, amount_);
-
-    emit TransferSingle(msg.sender, from_, to_, id_, amount_);
-    _requireReceiver(from_,to_,id_,amount_, data_);
-  }
-
-  function _safeBatchTransferFrom(address from_, address to_, uint256[] memory ids_, uint256[] memory amounts_, bytes memory data_) private {
-    require(amounts_.length == ids_.length, "ERC1155: accounts and ids length mismatch");
-
-    uint256[] memory batchBalances = new uint256[](amounts_.length);
-
-    for (uint256 _i = 0; _i < amounts_.length; ++_i) {
-        _transfer(from_,to_, ids_[_i], amounts_[_i]);
-    }
-
-    emit TransferBatch(msg.sender, from_, to_, ids_, amounts_);
-    _requireBatchReceiver(from_,to_,ids_,amounts_, data_);
-  }
-
-
-  function _transfer(address from_, address to_, uint256 id_, uint256 amount_) private {
-    _requireNonZero(to_);
-    _requireBalance(from_,id_,amount_);
-    AuctionAndRentStorage storage _ds = erc1155Storage();
-    _ds._balances[id_][from_] -= amount_;
-    _ds._balances[id_][to_] += amount_;
-  }
-
-  function _mint(address to_, string memory uri_, uint256 amount_) internal virtual {
-    _mint(to_, uri_, amount_, "");
-  }
-
-  function _mint(address to_, string memory uri_, uint256 amount_, bytes memory data_) internal virtual {
-    _requireNonZero(to_);
-
-    AuctionAndRentStorage storage _ds = erc1155Storage();
-    uint256 _id = _ds._uriID[uri_];
-    if(_id == 0){
-      _ds._idx++;
-      _id = _ds._idx;
-      _ds._tokenURIs[_id] = uri_;
-      _ds._uriID[uri_] = _id;
-    }
-
-    _ds._totalSupply[_id] += amount_;
-    _ds._balances[_id][to_] += amount_;
-
-    emit TransferSingle(msg.sender, address(0), to_, _id, amount_);
-
-    _requireReceiver(address(0), to_, _id, amount_, data_);
-  }
-
-  function _requireAuth(address account_) private view {
-    require(account_ == msg.sender || isApprovedForAll(account_, msg.sender),"ERC1155: caller is not token owner or approved");
-  }
-
-  function _requireNonZero(address account_) private view {
-    require(account_ != address(0), "ERC1155: address zero is not a valid owner");
-  }
-
-  function _requireBalance(address account_, uint256 id_, uint256 amount_) private view {
-    AuctionAndRentStorage storage _ds = erc1155Storage();
-    require(_ds._balances[id_][account_] >= amount_, "ERC1155: Insufficient balance");
-  }
-
-  function _requireReceiver(address from_, address to_, uint256 tokenID_, uint256 amount_, bytes memory data_) private {
-    require(_checkOnERC1155Received(from_, to_, tokenID_, amount_, data_), "ERC1155: transfer to non ERC1155Receiver implementer");
-  }
-
-  function _requireBatchReceiver(address from_, address to_, uint256[] memory tokenIDs_, uint256[] memory amounts_, bytes memory data_) private {
-    require(_checkOnERC1155BactchReceived(from_, to_, tokenIDs_, amounts_, data_), "ERC1155: transfer to non ERC1155Receiver implementer");
-  }
-
-  function _hasContract(address account_) private view returns (bool){
-    return account_.code.length > 0;
-  }
-
-  function _checkOnERC1155Received(address from_, address to_, uint256 tokenID_, uint256 amount_, bytes memory data_) private returns (bool) {
-    if (_hasContract(to_)) {
-        try IERC1155Receiver(to_).onERC1155Received(msg.sender, from_, tokenID_, amount_, data_) returns (bytes4 retval) {
-            return retval == IERC1155Receiver.onERC1155Received.selector;
-        } catch (bytes memory reason) {
-            if (reason.length == 0) {
-                revert("ERC1155: transfer to non ERC1155Receiver implementer");
-            } else {
-                /// @solidity memory-safe-assembly
-                assembly {
-                    revert(add(32, reason), mload(reason))
-                }
-            }
-        }
-    } else {
+contract Auction3 is ERC721StorageFacet, IERC721 {
+    function construct() external returns (bool) {
+        ERC721FacetStorage storage _ds = erc721Storage();
+        _ds._name = "Auction3";
+        _ds._symbol = "AUCT3";
+        _ds._baseURI = "http://localhost:3000/";
+        _ds.auctionExtensionTime = 5 minutes;
+        _ds.auctionFeePercentage = 5;
         return true;
     }
-  }
 
-  function _checkOnERC1155BactchReceived(address from_, address to_, uint256[] memory tokenIDs_, uint256[] memory amounts_, bytes memory data_) private returns (bool) {
-    if (_hasContract(to_)) {
-        try IERC1155Receiver(to_).onERC1155BatchReceived(msg.sender, from_, tokenIDs_, amounts_, data_) returns (bytes4 retval) {
-            return retval == IERC1155Receiver.onERC1155Received.selector;
-        } catch (bytes memory reason) {
-            if (reason.length == 0) {
-                revert("ERC1155: transfer to non ERC1155Receiver implementer");
-            } else {
-                /// @solidity memory-safe-assembly
-                assembly {
-                    revert(add(32, reason), mload(reason))
-                }
-            }
+    // application functions start
+    function createToken(address to_) external returns (uint256) {
+        return _mint(to_);
+    }
+
+    function listToAuction(
+        uint256 tokenID_,
+        uint256 startPrice_,
+        uint256 duration_
+    ) external {
+        _requireMinted(tokenID_);
+        _requireOwner(msg.sender, tokenID_);
+
+        ERC721FacetStorage storage _ds = erc721Storage();
+        Auction storage auction = _ds.auctions[tokenID_];
+        require(!auction.active, "Auction already active");
+
+        auction.startPrice = startPrice_;
+        auction.endTime = block.timestamp + duration_;
+        auction.active = true;
+        auction.highestBid = 0;
+        auction.highestBidder = address(0);
+    }
+
+    function placeBid(uint256 tokenID_) external payable {
+        ERC721FacetStorage storage _ds = erc721Storage();
+
+        Auction storage auction = _ds.auctions[tokenID_];
+        require(auction.active, "Auction not active");
+        require(block.timestamp < auction.endTime, "Auction ended");
+        require(msg.value > auction.highestBid, "Bid too low");
+
+        // Extend auction if bid is placed near end
+        if (auction.endTime - block.timestamp < _ds.auctionExtensionTime) {
+            auction.endTime = block.timestamp + _ds.auctionExtensionTime;
         }
-    } else {
+
+        // Refund previous highest bidder
+        if (auction.highestBidder != address(0)) {
+            payable(auction.highestBidder).transfer(auction.highestBid);
+        }
+
+        auction.highestBid = msg.value;
+        auction.highestBidder = msg.sender;
+        auction.bids[msg.sender] = msg.value;
+    }
+
+    function finalizeAuction(uint256 tokenID_) external {
+        ERC721FacetStorage storage _ds = erc721Storage();
+        Auction storage auction = _ds.auctions[tokenID_];
+        require(auction.active, "Auction not active");
+        require(block.timestamp >= auction.endTime, "Auction not ended");
+
+        auction.active = false;
+
+        if (auction.highestBidder != address(0)) {
+            uint256 fee = (auction.highestBid * _ds.auctionFeePercentage) / 100;
+            uint256 sellerAmount = auction.highestBid - fee;
+
+            address seller = _owner(tokenID_);
+            payable(seller).transfer(sellerAmount);
+            payable(LibDiamond.contractOwner()).transfer(fee);
+
+            _transferTo(seller, auction.highestBidder, tokenID_);
+        }
+    }
+    // application functions end
+
+    // base functions
+    function updateERC721(string memory baseURI_) external returns (bool) {
+        LibDiamond.enforceIsContractOwner();
+        ERC721FacetStorage storage _ds = erc721Storage();
+        _ds._baseURI = baseURI_;
         return true;
     }
-  }
 
-  function createAuction(
-      uint256 tokenId_,
-      uint256 startTime_,
-      uint256 duration_,
-      uint256 minBidIncrement_
-  ) external {
-      require(balanceOf(msg.sender, tokenId_) > 0, "Not token owner");
-      require(auctions[tokenId_].endTime == 0, "Auction exists");
-      
-      auctions[tokenId_] = Auction({
-          startTime: startTime_,
-          endTime: startTime_ + duration_,
-          highestBid: 0,
-          highestBidder: address(0),
-          ended: false,
-          extensionTime: 5 minutes,
-          minBidIncrement: minBidIncrement_
-      });
-  }
+    function symbol() public view virtual returns (string memory) {
+        ERC721FacetStorage storage _ds = erc721Storage();
+        return _ds._symbol;
+    }
 
-  function placeBid(uint256 tokenId_) external payable {
-      Auction storage auction = auctions[tokenId_];
-      require(block.timestamp >= auction.startTime, "Auction not started");
-      require(block.timestamp < auction.endTime, "Auction ended");
-      require(msg.value > auction.highestBid + auction.minBidIncrement, "Bid too low");
+    function name() public view virtual returns (string memory) {
+        ERC721FacetStorage storage _ds = erc721Storage();
+        return _ds._name;
+    }
 
-      // Extend auction if bid placed near end
-      if (auction.endTime - block.timestamp < auction.extensionTime) {
-          auction.endTime = block.timestamp + auction.extensionTime;
-      }
+    function tokenURI(uint256 tokenID_) public view returns (string memory) {
+        _requireMinted(tokenID_);
+        ERC721FacetStorage storage _ds = erc721Storage();
+        string memory _base = _ds._baseURI;
+        return string(abi.encodePacked(_base, tokenID_));
+    }
 
-      // Refund previous highest bidder
-      if (auction.highestBidder != address(0)) {
-          payable(auction.highestBidder).transfer(auction.highestBid);
-      }
+    // ERC721 INTERFACE FUNCTIONS
 
-      auction.highestBid = msg.value;
-      auction.highestBidder = msg.sender;
-      bids[tokenId_][msg.sender] = msg.value;
-  }
+    function balanceOf(address account_) external view returns (uint256) {
+        ERC721FacetStorage storage _ds = erc721Storage();
+        return _ds._balances[account_];
+    }
 
-  function endAuction(uint256 tokenId_) external {
-      Auction storage auction = auctions[tokenId_];
-      require(block.timestamp >= auction.endTime, "Auction not ended");
-      require(!auction.ended, "Auction already ended");
+    function ownerOf(uint256 tokenID_) public view virtual returns (address) {
+        _requireMinted(tokenID_);
+        return _owner(tokenID_);
+    }
 
-      auction.ended = true;
-      
-      if (auction.highestBidder != address(0)) {
-          // Transfer NFT to winner
-          _safeTransferFrom(msg.sender, auction.highestBidder, tokenId_, 1, "");
-          // Transfer funds to seller
-          payable(msg.sender).transfer(auction.highestBid);
-      }
-  }
+    function transfer(address to_, uint256 amount_) external returns (bool) {
+        return _transfer(msg.sender, to_, amount_);
+    }
 
-  function rent(
-      uint256 tokenId_,
-      uint256 startDate_,
-      uint256 endDate_,
-      address paymentToken_,
-      uint256 price_
-  ) external payable {
-      require(balanceOf(msg.sender, tokenId_) == 0, "Token owner cannot rent");
-      require(rentals[tokenId_].endDate < block.timestamp, "Already rented");
-      
-      if (paymentToken_ == address(0)) {
-          require(msg.value >= price_, "Insufficient payment");
-      } else {
-          // Handle ERC20 payment
-          // Requires approval first
-          IERC20(paymentToken_).transferFrom(msg.sender, address(this), price_);
-      }
+    function transferFrom(
+        address from_,
+        address to_,
+        uint256 tokenID_
+    ) external {
+        _requireAuth(from_, tokenID_);
+        _transfer(from_, to_, tokenID_);
+    }
 
-      rentals[tokenId_] = Rental({
-          startDate: startDate_,
-          endDate: endDate_,
-          paymentToken: paymentToken_,
-          price: price_,
-          renter: msg.sender
-      });
-  }
+    function approve(address operator_, uint256 tokenID_) external {
+        _approve(msg.sender, operator_, tokenID_);
+    }
 
+    function setApprovalForAll(address operator_, bool approved_) external {
+        _setApprovalForAll(msg.sender, operator_, approved_);
+    }
+
+    function getApproved(
+        uint256 tokenId
+    ) external view returns (address operator) {
+        ERC721FacetStorage storage _ds = erc721Storage();
+        return _ds._tokenApprovals[tokenId];
+    }
+
+    function isApprovedForAll(
+        address owner_,
+        address operator_
+    ) public view returns (bool) {
+        ERC721FacetStorage storage _ds = erc721Storage();
+        return _ds._operatorApprovals[owner_][operator_];
+    }
+
+    function safeTransferFrom(
+        address from_,
+        address to_,
+        uint256 tokenID_,
+        bytes memory data_
+    ) public {
+        _requireAuth(msg.sender, tokenID_);
+        _safeTransfer(from_, to_, tokenID_, data_);
+    }
+
+    function safeTransferFrom(
+        address from_,
+        address to_,
+        uint256 tokenID_
+    ) external {
+        safeTransferFrom(from_, to_, tokenID_, "");
+    }
+
+    // PRIVATE FUNCTIONS
+
+    function _setApprovalForAll(
+        address owner_,
+        address operator_,
+        bool approved_
+    ) internal virtual {
+        require(owner_ != operator_, "ERC721: approve to caller");
+
+        ERC721FacetStorage storage _ds = erc721Storage();
+        _ds._operatorApprovals[owner_][operator_] = approved_;
+
+        emit ApprovalForAll(owner_, operator_, approved_);
+    }
+
+    function _approve(
+        address owner_,
+        address operator_,
+        uint256 tokenID_
+    ) private returns (bool) {
+        require(
+            ownerOf(tokenID_) != operator_,
+            "ERC721: Approval to current owner"
+        );
+        _requireAuth(owner_, tokenID_);
+
+        ERC721FacetStorage storage _ds = erc721Storage();
+        _ds._tokenApprovals[tokenID_] = operator_;
+
+        emit Approval(ownerOf(tokenID_), operator_, tokenID_);
+        return true;
+    }
+
+    function _mint(address to_) private returns (uint256) {
+        require(to_ != address(0), "ERC721: Cannot transfer to 0 address");
+        ERC721FacetStorage storage _ds = erc721Storage();
+        _ds._idx += 1;
+        uint256 _tokenID = _ds._idx;
+        _ds._balances[to_] += 1;
+        _ds._owners[_tokenID] = to_;
+
+        emit Transfer(address(0), to_, _tokenID);
+        return _tokenID;
+    }
+
+    function _transferTo(
+        address from_,
+        address to_,
+        uint256 tokenID_
+    ) private returns (bool) {
+        ERC721FacetStorage storage _ds = erc721Storage();
+        require(!_ds.auctions[tokenID_].active, "Auction still active");
+
+        delete _ds._tokenApprovals[tokenID_];
+        _ds._owners[tokenID_] = to_;
+        _ds._balances[from_] -= 1;
+        _ds._balances[to_] += 1;
+
+        emit Transfer(from_, to_, tokenID_);
+        return true;
+    }
+
+    function _transfer(
+        address from_,
+        address to_,
+        uint256 tokenID_
+    ) private returns (bool) {
+        require(to_ != address(0), "ERC721: Cannot transfer to 0 address");
+        _requireMinted(tokenID_);
+        _requireOwner(from_, tokenID_);
+        /* _requireAuth(from_, tokenID_); */
+
+        _transferTo(from_, to_, tokenID_);
+        return true;
+    }
+
+    function _safeTransfer(
+        address from_,
+        address to_,
+        uint256 tokenID_,
+        bytes memory data_
+    ) internal {
+        _transfer(from_, to_, tokenID_);
+        _requireReciever(from_, to_, tokenID_, data_);
+    }
+
+    function _requireMinted(uint256 tokenId) internal view virtual {
+        require(_exists(tokenId), "ERC721: invalid token ID");
+    }
+
+    function _requireAuth(address from_, uint256 tokenID_) private view {
+        require(
+            _hasAuth(from_, tokenID_),
+            "ERC721: Not token owner or approved"
+        );
+    }
+
+    function _requireOwner(address from_, uint256 tokenID_) private view {
+        require(_owner(tokenID_) == from_, "ERC721: Not token owner");
+    }
+
+    function _requireReciever(
+        address from_,
+        address to_,
+        uint256 tokenID_,
+        bytes memory data_
+    ) private {
+        require(
+            _checkOnERC721Received(from_, to_, tokenID_, data_),
+            "ERC721: transfer to non ERC721Receiver implementer"
+        );
+    }
+
+    function _owner(uint256 tokenID_) internal view returns (address) {
+        ERC721FacetStorage storage _ds = erc721Storage();
+        return _ds._owners[tokenID_];
+    }
+
+    function _hasAuth(
+        address from_,
+        uint256 tokenID_
+    ) internal view returns (bool) {
+        address _ownerAddress = _owner(tokenID_);
+        return _ownerAddress == from_ || isApprovedForAll(_ownerAddress, from_);
+    }
+
+    function _exists(uint256 tokenId) internal view virtual returns (bool) {
+        return _owner(tokenId) != address(0);
+    }
+
+    function _hasContract(address account_) private view returns (bool) {
+        return account_.code.length > 0;
+    }
+
+    function _checkOnERC721Received(
+        address from_,
+        address to_,
+        uint256 tokenID_,
+        bytes memory data_
+    ) private returns (bool) {
+        if (_hasContract(to_)) {
+            try
+                IERC721Receiver(to_).onERC721Received(
+                    msg.sender,
+                    from_,
+                    tokenID_,
+                    data_
+                )
+            returns (bytes4 retval) {
+                return retval == IERC721Receiver.onERC721Received.selector;
+            } catch (bytes memory reason) {
+                if (reason.length == 0) {
+                    revert(
+                        "ERC721: transfer to non ERC721Receiver implementer"
+                    );
+                } else {
+                    /// @solidity memory-safe-assembly
+                    assembly {
+                        revert(add(32, reason), mload(reason))
+                    }
+                }
+            }
+        } else {
+            return true;
+        }
+    }
 }
