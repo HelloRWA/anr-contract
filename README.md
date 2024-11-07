@@ -1,5 +1,7 @@
 # Auction and Rent 合约代码核心部分
 
+社区TG：https://t.me/+SHSXIUyxXWwxYWVl
+
 项目计划商用，故暂时只提交了核心代码逻辑部分，非完整的合约代码。
 
 - [合约部署地址](https://explorer-holesky.morphl2.io/address/0xd7f8fD88193BBd31beF70C52519A71F756F0F85C)
